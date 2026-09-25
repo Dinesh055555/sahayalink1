@@ -116,6 +116,11 @@ main{padding:14px;max-width:900px;margin:0 auto}
 .okbox{margin-top:12px;background:var(--tealbg);color:var(--teal);border-radius:8px;padding:11px 13px;font-size:13px;font-weight:600}
 .regionbar{background:var(--accentbg);color:var(--accent);border-radius:10px;padding:11px 14px;margin-bottom:14px;font-size:13px}
 .regionbar b{font-weight:800}
+.consultline{margin-top:9px;font-size:12.5px;padding:7px 10px;border-radius:8px;font-weight:600}
+.consultline.done{background:var(--tealbg);color:var(--teal)}
+.consultline.wait{background:var(--highbg);color:var(--high)}
+.consultline b{font-weight:800}
+.bridgebox{margin-top:11px;padding-top:11px;border-top:1px dashed var(--line)}
 .hidden{display:none}
 @media(max-width:560px){.bar .lab{width:110px}}
 </style>
@@ -178,7 +183,7 @@ async function doLogin(){
     document.getElementById('app').classList.remove('hidden');
     document.getElementById('hname').textContent=res.name;
     document.getElementById('hrole').textContent=res.role+(res.block?' · '+res.block:'');
-    buildNav();go(res.role==='SUPERVISOR'?'dashboard':'worklist');
+    buildNav();go(res.role==='SUPERVISOR'?'dashboard':res.role==='CHO'?'bridge':'worklist');
   }catch(e){document.getElementById('lerr').textContent=e.message;}
 }
 function logout(){SESS=null;location.reload();}
@@ -187,7 +192,7 @@ const state={tab:'worklist',priority:'ALL',stage:'ALL',cases:[]};
 function buildNav(){
   let tabs;
   if(SESS.role==='SUPERVISOR'){tabs=[['dashboard','Dashboard'],['regions','Regions & Workers'],['daily','Daily Handover'],['leaderboard','Leaderboard'],['gov','Governance']];}
-  else if(SESS.role==='CHO'){tabs=[['worklist','My Queue'],['dashboard','Dashboard'],['rewards','Rewards'],['gov','Governance']];}
+  else if(SESS.role==='CHO'){tabs=[['bridge','Teleconsult Bridge'],['network','Hospitals & Doctors'],['completed','Completed Consults'],['gov','Governance']];}
   else{tabs=[['worklist','Today\'s List'],['rewards','My Rewards'],['leaderboard','Leaderboard'],['gov','Governance']];}
   document.getElementById('nav').innerHTML=tabs.map(t=>`<button data-t="${t[0]}" onclick="go('${t[0]}')">${t[1]}</button>`).join('');
 }
@@ -204,6 +209,9 @@ async function render(){
     else if(state.tab==='dashboard')await renderDashboard(m);
     else if(state.tab==='regions')await renderRegions(m);
     else if(state.tab==='daily')await renderDaily(m);
+    else if(state.tab==='bridge')await renderBridge(m);
+    else if(state.tab==='network')await renderNetwork(m);
+    else if(state.tab==='completed')await renderCompleted(m);
     else if(state.tab==='gov')m.innerHTML=govHTML();
   }catch(e){m.innerHTML=`<div class="count">Could not load: ${e.message}</div>`;}
 }
@@ -238,6 +246,11 @@ function caseHTML(c){
       <div><div class="pid">${c.patient_ref}<span class="cadre ${c.assigned_cadre}">${c.assigned_cadre}</span></div>
         <div class="sub">${c.village}, ${c.district} &middot; ${c.age||''}${c.gender?'/'+c.gender:''} &middot; ${c.diagnosis_group||''}</div></div>
       <div>${priBadge(c.priority)}<div class="risk">${c.risk_pct}% risk</div></div>
+    </div>
+    <div class="consultline ${c.consult_status==='completed'?'done':'wait'}">
+      ${c.consult_status==='completed'
+        ? `&#10003; Teleconsult completed${c.doctor_name?` with <b>${c.doctor_name}</b>`:''}${c.hospital_name?` at ${c.hospital_name}`:''} &middot; remaining tasks below`
+        : `&#9203; Teleconsult pending &middot; CHO to connect a doctor`}
     </div>
     <div class="action">&#9654; ${c.recommended_action}</div>
     <div class="why"><b>Why:</b> ${c.reason}</div>
@@ -437,15 +450,102 @@ async function runNightly(){
   }catch(e){toast(e.message);}
 }
 
+let CHO_NET=null;
+async function loadNet(){ if(!CHO_NET) CHO_NET=await api('/api/cho/network'); return CHO_NET; }
+
+async function renderBridge(m){
+  const [q,s,net]=await Promise.all([api('/api/cho/consults?status=awaiting'),api('/api/cho/summary'),loadNet()]);
+  const docOptions=net.doctors.map(d=>{
+    const h=net.hospitals.find(x=>x.id===d.hospital_id);
+    return `<option value="${d.id}|${d.hospital_id}">${d.name} · ${d.specialty} · ${h?h.name:''} (${d.teleconsult_mode})</option>`;
+  }).join('');
+  m.innerHTML=`
+   <div class="regionbar">Your role: <b>connect patients to a doctor for teleconsultation.</b> Completing a consult marks only that stage done — medicine, review and tests stay with the ASHA.</div>
+   <div class="kpirow">
+     <div class="kpi crit"><div class="n">${s.awaiting}</div><div class="l">Awaiting consult</div></div>
+     <div class="kpi teal"><div class="n">${s.completed}</div><div class="l">Consults done</div></div>
+     <div class="kpi"><div class="n">${s.completion_rate}%</div><div class="l">Completion rate</div></div>
+     <div class="kpi"><div class="n">${net.hospitals.length}</div><div class="l">Hospitals</div></div>
+     <div class="kpi"><div class="n">${net.doctors.length}</div><div class="l">Doctors</div></div>
+   </div>
+   <div class="count">${q.count} patients waiting to be connected to a doctor</div>
+   ${q.patients.map(p=>`<div class="case ${p.priority}">
+     <div class="crow">
+       <div><div class="pid">${p.patient_ref}</div>
+         <div class="sub">${p.village}, ${p.district} &middot; ${p.age||''}${p.gender?'/'+p.gender:''} &middot; ${p.diagnosis_group||''}</div></div>
+       <div>${priBadge(p.priority)}<div class="risk">${p.risk_pct}% risk</div></div>
+     </div>
+     <div class="chips"><span class="chip statustag unreachable">Awaiting teleconsult</span>
+       <span class="chip">${p.preferred_language||''}</span></div>
+     <div class="bridgebox">
+       <label class="sub">Connect to doctor / hospital:</label>
+       <div class="rasrow" style="margin-top:6px">
+         <select id="doc-${p.id}" style="flex:1;min-width:220px">${docOptions}</select>
+         <button class="minibtn-solid" onclick="completeConsult(${p.id})">Mark consult completed</button>
+       </div>
+     </div>
+   </div>`).join('')||'<div class="count">All patients have been connected. Great work.</div>'}`;
+}
+async function completeConsult(id){
+  const v=document.getElementById('doc-'+id).value.split('|');
+  try{
+    const r=await api('/api/cho/complete-consult',{method:'POST',
+      body:JSON.stringify({worklist_id:id,doctor_id:parseInt(v[0]),hospital_id:parseInt(v[1])})});
+    toast('Teleconsult completed · '+r.doctor+' @ '+r.hospital);
+    renderBridge(document.getElementById('main'));
+  }catch(e){toast(e.message);}
+}
+
+async function renderNetwork(m){
+  const net=await loadNet();
+  const byHosp={};
+  net.doctors.forEach(d=>{(byHosp[d.hospital_id]=byHosp[d.hospital_id]||[]).push(d);});
+  m.innerHTML=`
+   <div class="regionbar">The teleconsultation network you bridge patients into — hospitals, their doctors and specialties.</div>
+   ${net.hospitals.map(h=>`<div class="bars">
+     <h3>${h.name} <span class="chip" style="margin-left:6px">${h.hosp_type}</span></h3>
+     <div class="hint" style="margin-bottom:8px">${h.district} district</div>
+     ${(byHosp[h.id]||[]).map(d=>`<div class="detrow">
+       <span class="k">${d.name}</span>
+       <span>${d.specialty} &middot; ${d.teleconsult_mode}</span></div>`).join('')}
+   </div>`).join('')}`;
+}
+
+async function renderCompleted(m){
+  const [q,s]=await Promise.all([api('/api/cho/consults?status=completed'),api('/api/cho/summary')]);
+  m.innerHTML=`
+   <div class="grid2">
+     <div class="bars"><h3>Consults by hospital</h3>
+       ${(()=>{const mx=Math.max(1,...s.by_hospital.map(h=>h.consults));
+         return s.by_hospital.map(h=>`<div class="bar"><div class="lab">${h.hospital}</div>
+           <div class="track"><div class="fill" style="width:${Math.max(8,h.consults/mx*100)}%;background:var(--teal)">${h.consults}</div></div></div>`).join('');})()}
+     </div>
+     <div class="bars"><h3>Consult status by district</h3>
+       ${s.by_district.map(d=>`<div class="detrow"><span class="k">${d.district}</span>
+         <span>${d.completed} done · ${d.awaiting} awaiting</span></div>`).join('')}
+     </div>
+   </div>
+   <div class="bars">
+     <h3>Completed teleconsultations (${q.count})</h3>
+     <div class="hint" style="margin-bottom:10px">These consults are done. The remaining tasks flow to the ASHA — the whole team sees this.</div>
+     ${q.patients.slice(0,40).map(p=>`<div class="detrow">
+       <span class="k">${p.patient_ref} · ${p.village}</span>
+       <span>${p.doctor_name||'—'} · ${p.hospital_name||''}</span></div>`).join('')}
+   </div>`;
+}
+
 function govHTML(){return `
   <div class="bars gov"><h3>&#128272; Privacy &amp; minimum-necessary data</h3><ul>
     <li>Workers see a <b>masked patient reference</b>, village and the next action only &mdash; no clinical free-text or full identifiers.</li>
     <li>Phone numbers stay <b>masked</b>; calls go through the facility system.</li>
     <li>Aligned to <b>ABDM</b> principles. Data here is synthetic.</li></ul></div>
   <div class="bars gov"><h3>&#128100; Role-based access</h3><ul>
-    <li><b>ASHA</b> sees only her assigned villages' worklist.</li>
-    <li><b>CHO</b> sees clinical escalations, resupply and coverage.</li>
-    <li><b>Supervisor</b> sees aggregates, never edits individual records.</li></ul></div>
+    <li><b>ASHA</b> sees only her assigned villages' worklist and follows up on care tasks.</li>
+    <li><b>CHO</b> is the bridge: connects each patient to a doctor and hospital and completes the teleconsultation.</li>
+    <li><b>Supervisor</b> oversees the process, coverage and daily handover across all workers.</li></ul></div>
+  <div class="bars gov"><h3>&#128101; One shared status for every stakeholder</h3><ul>
+    <li>When a CHO completes a teleconsult, the <b>same status</b> (doctor, hospital, time) appears for the ASHA and supervisor.</li>
+    <li>The consult is marked done while the <b>remaining tasks stay open</b> for follow-up, so no stage is lost.</li></ul></div>
   <div class="bars gov"><h3>&#128260; Follow-up that does not give up</h3><ul>
     <li>An unreachable patient is <b>reassigned to another worker</b> the next day.</li>
     <li>After <b>3 failed attempts</b> the case escalates to a CHO.</li>
